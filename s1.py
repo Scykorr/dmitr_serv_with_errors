@@ -2,28 +2,33 @@ import os
 import threading
 from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import FTPHandler
-from pyftpdlib.servers import ThreadedFTPServer
-import socket
+from pyftpdlib.servers import FTPServer
 from ssl import SSLContext, PROTOCOL_TLS_SERVER
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from datetime import datetime, timezone, timedelta
+import socket
 import tkinter as tk
 from tkinter import messagebox, scrolledtext
+import ssl  # Добавили для явного указания
 
 
 # Генерация сертификата и ключа
 def generate_certificates():
     try:
         private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
         with open("server.key", "wb") as f:
-            f.write(private_key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption()
-            ))
+            f.write(
+                private_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.TraditionalOpenSSL,
+                    encryption_algorithm=serialization.NoEncryption(),
+                )
+            )
+
         subject = issuer = x509.Name([
             x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
             x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "California"),
@@ -31,6 +36,7 @@ def generate_certificates():
             x509.NameAttribute(NameOID.ORGANIZATION_NAME, "My Company"),
             x509.NameAttribute(NameOID.COMMON_NAME, "localhost"),
         ])
+
         cert = (
             x509.CertificateBuilder()
             .subject_name(subject)
@@ -42,6 +48,7 @@ def generate_certificates():
             .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
             .sign(private_key, hashes.SHA256())
         )
+
         with open("server.crt", "wb") as f:
             f.write(cert.public_bytes(serialization.Encoding.PEM))
 
@@ -55,23 +62,33 @@ def generate_certificates():
         messagebox.showerror("Ошибка", f"Не удалось сгенерировать сертификаты: {e}")
 
 
-# Запуск FTP-сервера
+# Запуск FTP-сервера с поддержкой TLS
 def start_ftp_server(ip="localhost", port=21, user="user", password="password"):
     try:
         authorizer = DummyAuthorizer()
         authorizer.add_user(user, password, homedir=".", perm="elradfmw")
+
         handler = FTPHandler
         handler.authorizer = authorizer
-        server = ThreadedFTPServer((ip, port), handler)
+
+        # Настройки TLS
+        handler.certfile = 'server.crt'
+        handler.keyfile = 'server.key'
+        handler.tls_control = True   # Шифрование команд
+        handler.tls_data = True      # Шифрование данных
+
+        server = FTPServer((ip, port), handler)
         ftp_thread = threading.Thread(target=server.serve_forever)
         ftp_thread.daemon = True
         ftp_thread.start()
+
         messagebox.showinfo("Успех", f"FTP-сервер запущен на {ip}:{port}")
+
     except Exception as e:
         messagebox.showerror("Ошибка", f"Не удалось запустить FTP-сервер: {e}")
 
 
-# Запуск TLS-сервера
+# Запуск TLS-сервера для обработки файлов
 def start_tls_server(host, port):
     if not os.path.exists("server.crt") or not os.path.exists("server.key"):
         messagebox.showerror("Ошибка", "Сертификаты не найдены. Сгенерируйте сертификаты.")
@@ -88,8 +105,8 @@ def start_tls_server(host, port):
                 try:
                     conn, addr = sock.accept()
                     print(f"Подключено клиентом: {addr}")
-                    with context.wrap_socket(conn, server_side=True) as sconn:
-                        data = sconn.recv(1024)
+                    with context.wrap_socket(conn, server_side=True) as ssock:
+                        data = ssock.recv(1024)
                         print(f"Получено: {data.decode('utf-8')}")
                 except Exception as e:
                     print(f"Ошибка при работе сервера: {e}")
@@ -133,7 +150,7 @@ def auto_detect_ports(ip_entry, tls_port_entry, ftp_port_entry):
         messagebox.showerror("Ошибка", f"Не удалось выполнить автоопределение: {e}")
 
 
-# Интерфейс
+# Интерфейс сервера
 class ServerApp:
     def __init__(self, root):
         self.root = root
@@ -199,7 +216,7 @@ class ServerApp:
             return
 
         try:
-            with socket.create_connection((ip, int(tls_port)), timeout=2) as sock:
+            with socket.create_connection((ip, int(tls_port)), timeout=2):
                 pass
             messagebox.showinfo("Успех", "Подключение к серверу установлено!")
         except (socket.timeout, ConnectionRefusedError):

@@ -6,7 +6,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.backends import default_backend
 import tkinter as tk
-from tkinter import messagebox, scrolledtext
+from tkinter import messagebox, scrolledtext, filedialog, ttk, Frame, Label, Entry, Button, END, DoubleVar
 from ftplib import FTP
 
 
@@ -55,7 +55,7 @@ def generate_rsa_keys():
     )
 
 
-# Расшифровка AES ключа с помощью RSA
+# Расшифровка AES-ключа с помощью RSA
 def decrypt_aes_key(encrypted_aes_key, private_key):
     try:
         aes_key = private_key.decrypt(
@@ -75,13 +75,13 @@ def decrypt_aes_key(encrypted_aes_key, private_key):
 def decrypt_file(iv, ciphertext, aes_key):
     cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
     decryptor = cipher.decryptor()
-    plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+    padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
 
     # Удаление PKCS7 padding
-    padding_length = plaintext[-1]
+    padding_length = padded_plaintext[-1]
     if not (1 <= padding_length <= 16):
         raise ValueError("Неверный формат PKCS7 padding")
-    plaintext = plaintext[:-padding_length]
+    plaintext = padded_plaintext[:-padding_length]
 
     return plaintext
 
@@ -91,13 +91,14 @@ def receive_and_decrypt_file(host, port, private_key):
     try:
         if not os.path.exists("server.crt"):
             messagebox.showerror("Ошибка", "Сертификат сервера не найден.")
-            return
+            return None
 
         context = SSLContext(PROTOCOL_TLS_CLIENT)
-        context.load_verify_locations("server.crt")
+        context.load_verify_locations(cafile="server.crt")
         context.verify_mode = CERT_REQUIRED
+        context.check_hostname = True
 
-        with socket.create_connection((host, int(port))) as sock:
+        with socket.create_connection((host, int(port)), timeout=2) as sock:
             with context.wrap_socket(sock, server_hostname=host) as ssock:
                 # Получение зашифрованного AES-ключа
                 encrypted_aes_key_len = int.from_bytes(ssock.recv(4), "big")
@@ -117,7 +118,7 @@ def receive_and_decrypt_file(host, port, private_key):
                     raise ValueError("Неверная длина данных")
                 ciphertext = ssock.recv(ciphertext_len)
 
-                file_extension = ssock.recv(4).decode().strip('\x00')  # Безопасное удаление нулевых символов
+                file_extension = ssock.recv(4).decode().strip('\x00')
 
                 # Расшифровка AES-ключа
                 aes_key = decrypt_aes_key(encrypted_aes_key, private_key)
@@ -125,7 +126,7 @@ def receive_and_decrypt_file(host, port, private_key):
                 # Расшифровка файла
                 plaintext = decrypt_file(iv, ciphertext, aes_key)
 
-                # Сохранение расшифрованного файла
+                # Сохранение
                 output_path = f"decrypted_file{file_extension}"
                 with open(output_path, "wb") as f:
                     f.write(plaintext)
@@ -166,23 +167,25 @@ class App:
         center_frame = tk.Frame(root, bg="#444")
         center_frame.pack(expand=True, padx=20, pady=20)
 
-        # IP Entry
+        # Поле ввода IP-адреса
         self.ip_entry = tk.Entry(center_frame, width=30, fg="gray")
         self.ip_entry.insert(0, "Введите IP-адрес сервера")
         self.ip_entry.bind("<FocusIn>", self.clear_ip_placeholder)
         self.ip_entry.bind("<FocusOut>", self.add_ip_placeholder)
         self.ip_entry.grid(row=0, column=0, pady=5, padx=10, sticky="w")
 
-        # Port Entry
+        # Поле ввода порта
         self.port_entry = tk.Entry(center_frame, width=30, fg="gray")
         self.port_entry.insert(0, "Введите порт сервера")
         self.port_entry.bind("<FocusIn>", self.clear_port_placeholder)
         self.port_entry.bind("<FocusOut>", self.add_port_placeholder)
         self.port_entry.grid(row=1, column=0, pady=5, padx=10, sticky="w")
 
-        # Кнопки
+        # Кнопка получения сертификата
         tk.Button(center_frame, text="Получить сертификат", command=self.download_certificate,
                   bg="#555", fg="white").grid(row=2, column=0, pady=10)
+
+        # Кнопка подключения к серверу
         tk.Button(center_frame, text="Подключиться к серверу", command=self.connect_to_server,
                   bg="#555", fg="white").grid(row=3, column=0, pady=10)
 
@@ -198,13 +201,12 @@ class App:
         ]
 
         for i, (text, command) in enumerate(buttons_left):
-            tk.Button(buttons_frame, text=text, command=command, bg="#555", fg="white").grid(
-                row=i, column=0, pady=5, padx=5, sticky="ew"
-            )
+            btn = tk.Button(buttons_frame, text=text, command=command, bg="#555", fg="white")
+            btn.grid(row=i, column=0, pady=5, padx=5, sticky="ew")
+
         for i, (text, command) in enumerate(buttons_right):
-            tk.Button(buttons_frame, text=text, command=command, bg="#555", fg="white").grid(
-                row=i, column=1, pady=5, padx=5, sticky="ew"
-            )
+            btn = tk.Button(buttons_frame, text=text, command=command, bg="#555", fg="white")
+            btn.grid(row=i, column=1, pady=5, padx=5, sticky="ew")
 
         self.decrypted_file_path = None
 
@@ -261,8 +263,9 @@ class App:
 
         try:
             context = SSLContext(PROTOCOL_TLS_CLIENT)
-            context.load_verify_locations("server.crt")
+            context.load_verify_locations(cafile="server.crt")
             context.verify_mode = CERT_REQUIRED
+            context.check_hostname = False
 
             with socket.create_connection((ip, int(port))) as sock:
                 with context.wrap_socket(sock, server_hostname=ip) as ssock:
@@ -278,10 +281,14 @@ class App:
         if not ip or not port:
             messagebox.showwarning("Ошибка", "Заполните все поля!")
             return
+
         private_key = load_private_key()
-        if not private_key:
+        if private_key is None:
             return
-        self.decrypted_file_path = receive_and_decrypt_file(ip, port, private_key)
+
+        decrypted_path = receive_and_decrypt_file(ip, port, private_key)
+        if decrypted_path:
+            self.decrypted_file_path = decrypted_path
 
     def print_file(self):
         if not self.decrypted_file_path:

@@ -6,7 +6,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.backends import default_backend
 import ssl
-from tkinter import filedialog, messagebox, scrolledtext, ttk, Tk, Frame, Label, Entry, Button, END, DoubleVar
+from tkinter import filedialog, messagebox, scrolledtext, ttk, Tk, Frame, Label, Entry, Button, END
+import tkinter as tk
 
 
 # Загрузка публичного ключа
@@ -29,7 +30,6 @@ def generate_rsa_keys():
         public_exponent=65537, key_size=2048, backend=default_backend()
     )
     public_key = private_key.public_key()
-
     # Сохранение приватного ключа
     with open("private_key.pem", "wb") as f:
         f.write(
@@ -39,7 +39,6 @@ def generate_rsa_keys():
                 encryption_algorithm=serialization.NoEncryption(),
             )
         )
-
     # Сохранение публичного ключа
     with open("public_key.pem", "wb") as f:
         f.write(
@@ -48,7 +47,6 @@ def generate_rsa_keys():
                 format=serialization.PublicFormat.SubjectPublicKeyInfo,
             )
         )
-
     return public_key.public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
@@ -73,28 +71,28 @@ def encrypt_file(file_path, aes_key):
     with open(file_path + ".enc", "wb") as f:
         f.write(iv + ciphertext)
 
-    os.remove(file_path)  # Удаляем оригинальный файл
+    os.remove(file_path)  # Удаляем оригинальный файл после шифрования
 
 
 # Расшифровка файла с помощью AES
 def decrypt_file(file_path, aes_key):
     with open(file_path, "rb") as f:
         data = f.read()
-
     iv = data[:16]
     ciphertext = data[16:]
 
     cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
     decryptor = cipher.decryptor()
-
     padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
     padding_length = padded_plaintext[-1]
     plaintext = padded_plaintext[:-padding_length]
 
-    with open(file_path.replace(".enc", "_decrypted.docx"), "wb") as f:
+    new_path = file_path.replace(".enc", "_decrypted.docx")
+    with open(new_path, "wb") as f:
         f.write(plaintext)
 
-    os.remove(file_path)  # Удаляем зашифрованный файл
+    os.remove(file_path)
+    return new_path
 
 
 # Расшифровка AES-ключа с помощью RSA
@@ -108,7 +106,7 @@ def decrypt_aes_key(encrypted_key):
         aes_key = private_key.decrypt(
             encrypted_key,
             padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                mgf=padding.MGF1(hashes.SHA256()),
                 algorithm=hashes.SHA256(),
                 label=None,
             ),
@@ -123,8 +121,9 @@ def decrypt_aes_key(encrypted_key):
 def send_file(ip, port, file_path, public_key, progress_callback=None):
     try:
         context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
+        context.load_verify_locations(cafile="server.crt")
+        context.check_hostname = True
+        context.verify_mode = ssl.CERT_REQUIRED
 
         aes_key = os.urandom(32)
         encrypted_key = public_key.encrypt(
@@ -138,7 +137,7 @@ def send_file(ip, port, file_path, public_key, progress_callback=None):
 
         with socket.create_connection((ip, int(port))) as sock:
             with context.wrap_socket(sock, server_hostname=ip) as ssock:
-                ssock.sendall(len(encrypted_key).to_bytes(4, 'big'))
+                ssock.sendall(len(encrypted_key).to_bytes(4, "big"))
                 ssock.sendall(encrypted_key)
 
                 with open(file_path, "rb") as f:
@@ -148,6 +147,7 @@ def send_file(ip, port, file_path, public_key, progress_callback=None):
         for i in range(100):
             progress_callback(i + 1)
         messagebox.showinfo("Успех", "Файл успешно отправлен!")
+
     except Exception as e:
         messagebox.showerror("Ошибка", f"Не удалось отправить файл: {e}")
 
@@ -168,7 +168,7 @@ def download_certificate_via_ftp(ip, port, user, password):
         return False
 
 
-# Проверка соединения с сервером
+# Проверка соединения
 def check_server_connection(ip, port):
     try:
         sock = socket.create_connection((ip, int(port)), timeout=2)
@@ -178,7 +178,7 @@ def check_server_connection(ip, port):
         return False
 
 
-# Интерфейс программы
+# Интерфейс
 class App:
     def __init__(self, root):
         self.root = root
@@ -216,13 +216,14 @@ class App:
 
         for i, (text, command) in enumerate(buttons):
             Button(buttons_frame, text=text, command=command, bg="#555", fg="white").grid(
-                row=i, column=0, pady=5, padx=5, sticky="ew")
+                row=i, column=0, pady=5, padx=5, sticky="ew"
+            )
 
         Label(center_frame, text="Публичный ключ:", bg="#444", fg="white").grid(row=4, column=0, sticky="w")
         self.key_text = scrolledtext.ScrolledText(center_frame, width=60, height=10, wrap="word")
         self.key_text.grid(row=5, column=0, columnspan=2, padx=10, pady=5)
 
-        self.progress = DoubleVar()
+        self.progress = tk.DoubleVar()
         self.progress_bar = ttk.Progressbar(center_frame, variable=self.progress, maximum=100, length=400)
         self.progress_bar.grid(row=6, column=0, columnspan=2, pady=10)
 
@@ -237,7 +238,7 @@ class App:
         if check_server_connection(ip, port):
             messagebox.showinfo("Успех", "Подключение к серверу установлено!")
         else:
-            messagebox.showerror("Ошибка", "Сервер недоступен!")
+            messagebox.showerror("Ошибка", "Сервер недоступен.")
 
     def select_file(self):
         file_path = filedialog.askopenfilename(title="Выберите Word-документ",
@@ -268,14 +269,14 @@ class App:
                 data = f.read()
             iv = data[:16]
             ciphertext = data[16:]
-            encrypted_aes_key = ciphertext[:256]
+            encrypted_aes_key = ciphertext[:256]  # Примерное значение
             aes_key = decrypt_aes_key(encrypted_aes_key)
             if aes_key is None:
                 return
-            decrypt_file(self.file_path, aes_key)
-            messagebox.showinfo("Успех", "Файл успешно расшифрован!")
-        except FileNotFoundError:
-            messagebox.showerror("Ошибка", "Файл не найден.")
+            decrypted_path = decrypt_file(self.file_path, aes_key)
+            messagebox.showinfo("Успех", f"Файл сохранён как {decrypted_path}")
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось расшифровать файл: {e}")
 
     def send_encrypted_file(self):
         ip = self.ip_entry.get()
@@ -310,6 +311,6 @@ class App:
 
 
 if __name__ == "__main__":
-    root = Tk()
+    root = tk.Tk()
     app = App(root)
     root.mainloop()
