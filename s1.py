@@ -1,7 +1,7 @@
 import os
 import threading
 from pyftpdlib.authorizers import DummyAuthorizer
-from pyftpdlib.handlers import FTPHandler
+from pyftpdlib.handlers import TLS_FTPHandler
 from pyftpdlib.servers import FTPServer
 from ssl import SSLContext, PROTOCOL_TLS_SERVER
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -68,7 +68,7 @@ def start_ftp_server(ip="localhost", port=21, user="user", password="password"):
         authorizer = DummyAuthorizer()
         authorizer.add_user(user, password, homedir=".", perm="elradfmw")
 
-        handler = FTPHandler
+        handler = TLS_FTPHandler
         handler.authorizer = authorizer
 
         # Настройки TLS

@@ -1,6 +1,6 @@
 import os
 import socket
-from ftplib import FTP_TLS
+from ftplib import FTP
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes, serialization
@@ -54,32 +54,38 @@ def generate_rsa_keys():
 
 
 # Шифрование файла с помощью AES
-def encrypt_file(file_path, aes_key):
+def encrypt_file(file_path, aes_key, encrypted_key):
     iv = os.urandom(16)
     cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
     encryptor = cipher.encryptor()
-
     with open(file_path, "rb") as f:
         plaintext = f.read()
-
     # Добавляем PKCS7 padding
     padding_len = 16 - (len(plaintext) % 16)
     plaintext += bytes([padding_len]) * padding_len
-
     ciphertext = encryptor.update(plaintext) + encryptor.finalize()
-
+    # Сохраняем: длина ключа (4 байта), ключ, IV, шифротекст
     with open(file_path + ".enc", "wb") as f:
-        f.write(iv + ciphertext)
-
-    os.remove(file_path)  # Удаляем оригинальный файл после шифрования
+        f.write(len(encrypted_key).to_bytes(4, "big"))
+        f.write(encrypted_key)
+        f.write(iv)
+        f.write(ciphertext)
+    os.remove(file_path)
 
 
 # Расшифровка файла с помощью AES
 def decrypt_file(file_path, aes_key):
     with open(file_path, "rb") as f:
         data = f.read()
-    iv = data[:16]
-    ciphertext = data[16:]
+
+    offset = 0
+    key_length = int.from_bytes(data[offset:offset+4], byteorder='big')
+    offset += 4
+    encrypted_aes_key = data[offset:offset+key_length]
+    offset += key_length
+    iv = data[offset:offset+16]
+    offset += 16
+    ciphertext = data[offset:]
 
     cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
     decryptor = cipher.decryptor()
@@ -90,7 +96,6 @@ def decrypt_file(file_path, aes_key):
     new_path = file_path.replace(".enc", "_decrypted.docx")
     with open(new_path, "wb") as f:
         f.write(plaintext)
-
     os.remove(file_path)
     return new_path
 
@@ -102,7 +107,6 @@ def decrypt_aes_key(encrypted_key):
             private_key = serialization.load_pem_private_key(
                 f.read(), password=None, backend=default_backend()
             )
-
         aes_key = private_key.decrypt(
             encrypted_key,
             padding.OAEP(
@@ -124,7 +128,6 @@ def send_file(ip, port, file_path, public_key, progress_callback=None):
         context.load_verify_locations(cafile="server.crt")
         context.check_hostname = True
         context.verify_mode = ssl.CERT_REQUIRED
-
         aes_key = os.urandom(32)
         encrypted_key = public_key.encrypt(
             aes_key,
@@ -134,31 +137,26 @@ def send_file(ip, port, file_path, public_key, progress_callback=None):
                 label=None,
             ),
         )
-
         with socket.create_connection((ip, int(port))) as sock:
             with context.wrap_socket(sock, server_hostname=ip) as ssock:
                 ssock.sendall(len(encrypted_key).to_bytes(4, "big"))
                 ssock.sendall(encrypted_key)
-
                 with open(file_path, "rb") as f:
                     file_data = f.read()
                 ssock.sendall(file_data)
-
         for i in range(100):
             progress_callback(i + 1)
         messagebox.showinfo("Успех", "Файл успешно отправлен!")
-
     except Exception as e:
         messagebox.showerror("Ошибка", f"Не удалось отправить файл: {e}")
 
 
-# Скачивание сертификата через FTPS
-def download_certificate_via_ftp(ip, port, user, password):
+# Скачивание сертификата через FTP
+def download_certificate_via_ftp(server_ip):
     try:
-        ftp = FTP_TLS()
-        ftp.connect(ip, port)
-        ftp.login(user, password)
-        ftp.prot_p()
+        ftp = FTP()
+        ftp.connect(server_ip, 21)
+        ftp.login("user", "password")
         with open("server.crt", "wb") as f:
             ftp.retrbinary("RETR server.crt", f.write)
         ftp.quit()
@@ -185,7 +183,6 @@ class App:
         self.root.title("Клиент")
         self.root.geometry("800x600")
         self.root.configure(bg="#444")
-
         center_frame = Frame(root, bg="#444")
         center_frame.pack(expand=True, padx=20, pady=20)
 
@@ -256,8 +253,17 @@ class App:
         except FileNotFoundError:
             messagebox.showerror("Ошибка", "Публичный ключ не найден. Сгенерируйте ключи.")
             return
+
         aes_key = os.urandom(32)
-        encrypt_file(self.file_path, aes_key)
+        encrypted_key = public_key.encrypt(
+            aes_key,
+            padding.OAEP(
+                mgf=padding.MGF1(hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None,
+            ),
+        )
+        encrypt_file(self.file_path, aes_key, encrypted_key)
         messagebox.showinfo("Успех", "Файл успешно зашифрован!")
 
     def decrypt_selected_file(self):
@@ -265,18 +271,42 @@ class App:
             messagebox.showwarning("Ошибка", "Файл не выбран!")
             return
         try:
-            with open(self.file_path, "rb") as f:
+            with open(self.file_path + '.enc', 'rb') as f:
                 data = f.read()
-            iv = data[:16]
-            ciphertext = data[16:]
-            encrypted_aes_key = ciphertext[:256]  # Примерное значение
+
+            offset = 0
+            key_length = int.from_bytes(data[offset:offset+4], byteorder='big')
+            offset += 4
+            encrypted_aes_key = data[offset:offset+key_length]
+            offset += key_length
+            iv = data[offset:offset+16]
+            offset += 16
+            ciphertext = data[offset:]
+
             aes_key = decrypt_aes_key(encrypted_aes_key)
             if aes_key is None:
                 return
-            decrypted_path = decrypt_file(self.file_path, aes_key)
-            messagebox.showinfo("Успех", f"Файл сохранён как {decrypted_path}")
+
+            new_path = self.decrypt_file_manually(self.file_path, ciphertext, iv, aes_key)
+            messagebox.showinfo("Успех", f"Файл сохранён как {new_path}")
+
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось расшифровать файл: {e}")
+
+    @staticmethod
+    def decrypt_file_manually(file_path, ciphertext, iv, aes_key):
+        try:
+            cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
+            decryptor = cipher.decryptor()
+            padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+            padding_length = padded_plaintext[-1]
+            plaintext = padded_plaintext[:-padding_length]
+            new_path = file_path.replace(".enc", "_decrypted.docx")
+            with open(new_path, "wb") as f:
+                f.write(plaintext)
+            return new_path
+        except Exception as e:
+            raise RuntimeError(f"Ошибка при расшифровке: {e}")
 
     def send_encrypted_file(self):
         ip = self.ip_entry.get()
@@ -302,7 +332,7 @@ class App:
         if not ip:
             messagebox.showwarning("Ошибка", "Введите IP-адрес сервера!")
             return
-        if download_certificate_via_ftp(ip, 21, "user", "password"):
+        if download_certificate_via_ftp(ip):
             messagebox.showinfo("Успех", "Сертификат успешно загружен!")
 
     def update_progress(self, value):
