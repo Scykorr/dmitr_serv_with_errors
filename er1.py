@@ -1,3 +1,4 @@
+import logging
 import os
 import socket
 from ftplib import FTP
@@ -122,12 +123,19 @@ def decrypt_aes_key(encrypted_key):
 
 
 # Отправка файла через TLS
+logging.basicConfig(level=logging.DEBUG)
+
 def send_file(ip, port, file_path, public_key, progress_callback=None):
     try:
+        logging.debug("Проверяю наличие сертификата сервера...")
+        if not os.path.exists("server.crt"):
+            raise FileNotFoundError("Сертификат сервера не найден.")
+
         context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
         context.load_verify_locations(cafile="server.crt")
         context.check_hostname = True
         context.verify_mode = ssl.CERT_REQUIRED
+
         aes_key = os.urandom(32)
         encrypted_key = public_key.encrypt(
             aes_key,
@@ -137,17 +145,25 @@ def send_file(ip, port, file_path, public_key, progress_callback=None):
                 label=None,
             ),
         )
+
         with socket.create_connection((ip, int(port))) as sock:
             with context.wrap_socket(sock, server_hostname=ip) as ssock:
+                logging.debug(f"SSL установлен: {ssock.cipher()}")
                 ssock.sendall(len(encrypted_key).to_bytes(4, "big"))
                 ssock.sendall(encrypted_key)
                 with open(file_path, "rb") as f:
                     file_data = f.read()
                 ssock.sendall(file_data)
+
         for i in range(100):
             progress_callback(i + 1)
         messagebox.showinfo("Успех", "Файл успешно отправлен!")
+
+    except FileNotFoundError as e:
+        logging.error(f"Ошибка: {e}")
+        messagebox.showerror("Ошибка", f"Не удалось отправить файл: {e}")
     except Exception as e:
+        logging.error(f"Ошибка: {e}")
         messagebox.showerror("Ошибка", f"Не удалось отправить файл: {e}")
 
 
@@ -169,10 +185,16 @@ def download_certificate_via_ftp(server_ip):
 # Проверка соединения
 def check_server_connection(ip, port):
     try:
-        sock = socket.create_connection((ip, int(port)), timeout=2)
-        sock.close()
-        return True
-    except (socket.timeout, ConnectionRefusedError):
+        context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE  # или CERT_REQUIRED, если используется сертификат
+
+        with socket.create_connection((ip, int(port)), timeout=2) as sock:
+            with context.wrap_socket(sock, server_hostname=ip) as ssock:
+                print("TLS-соединение установлено")
+                return True
+    except (socket.timeout, ConnectionRefusedError, ssl.SSLError) as e:
+        print(f"Ошибка при подключении: {e}")
         return False
 
 

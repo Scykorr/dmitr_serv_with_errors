@@ -1,25 +1,34 @@
 import os
+import ssl
 import threading
 from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import TLS_FTPHandler
 from pyftpdlib.servers import FTPServer
-from ssl import SSLContext, PROTOCOL_TLS_SERVER
+from ssl import SSLContext, PROTOCOL_TLS_SERVER, CERT_REQUIRED
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography import x509
 from cryptography.x509.oid import NameOID
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.backends import default_backend
 from datetime import datetime, timezone, timedelta
 import socket
 import tkinter as tk
-from tkinter import messagebox, scrolledtext
-import ssl  # Добавили для явного указания
+from tkinter import messagebox, scrolledtext, ttk, END
 
 
-# Генерация сертификата и ключа
+# Генерация самоподписанного сертификата
 def generate_certificates():
     try:
-        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        # Генерация RSA-ключа
+        private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=default_backend()
+        )
 
+        # Сохраняем приватный ключ
         with open("server.key", "wb") as f:
             f.write(
                 private_key.private_bytes(
@@ -29,6 +38,7 @@ def generate_certificates():
                 )
             )
 
+        # Создаем Subject и Issuer (самоподписанный)
         subject = issuer = x509.Name([
             x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
             x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, "California"),
@@ -37,6 +47,7 @@ def generate_certificates():
             x509.NameAttribute(NameOID.COMMON_NAME, "localhost"),
         ])
 
+        # Генерируем сертификат
         cert = (
             x509.CertificateBuilder()
             .subject_name(subject)
@@ -44,17 +55,24 @@ def generate_certificates():
             .public_key(private_key.public_key())
             .serial_number(x509.random_serial_number())
             .not_valid_before(datetime.now(timezone.utc))
-            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=365))
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
-            .sign(private_key, hashes.SHA256())
+            .not_valid_after(
+                datetime.now(timezone.utc) + timedelta(days=365)
+            )
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("localhost")]),
+                critical=False,
+            )
+            .sign(private_key, hashes.SHA256(), backend=default_backend())
         )
 
+        # Сохраняем сертификат
         with open("server.crt", "wb") as f:
             f.write(cert.public_bytes(serialization.Encoding.PEM))
 
+        # Обновляем отображение сертификата в интерфейсе
         with open("server.crt", "r") as f:
-            app.cert_text.delete(1.0, tk.END)
-            app.cert_text.insert(tk.END, f.read())
+            app.cert_text.delete(1.0, END)
+            app.cert_text.insert(END, f.read())
 
         messagebox.showinfo("Успех", "Сертификаты успешно сгенерированы!")
 
@@ -74,8 +92,8 @@ def start_ftp_server(ip="localhost", port=21, user="user", password="password"):
         # Настройки TLS
         handler.certfile = 'server.crt'
         handler.keyfile = 'server.key'
-        handler.tls_control = True   # Шифрование команд
-        handler.tls_data = True      # Шифрование данных
+        handler.tls_control = True  # Шифрование команд
+        handler.tls_data = True     # Шифрование данных
 
         server = FTPServer((ip, port), handler)
         ftp_thread = threading.Thread(target=server.serve_forever)
@@ -91,23 +109,27 @@ def start_ftp_server(ip="localhost", port=21, user="user", password="password"):
 # Запуск TLS-сервера для обработки файлов
 def start_tls_server(host, port):
     if not os.path.exists("server.crt") or not os.path.exists("server.key"):
-        messagebox.showerror("Ошибка", "Сертификаты не найдены. Сгенерируйте сертификаты.")
+        messagebox.showerror("Ошибка", "Сертификаты не найдены. Сгенерируйте их.")
         return
 
     def run_server():
         context = SSLContext(PROTOCOL_TLS_SERVER)
-        context.load_cert_chain("server.crt", "server.key")
+        context.load_cert_chain(certfile="server.crt", keyfile="server.key")
+        context.verify_mode = CERT_REQUIRED  # Требовать клиентский сертификат
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.maximum_version = ssl.TLSVersion.TLSv1_3
+
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind((host, port))
             sock.listen()
             print(f"TLS-сервер запущен на {host}:{port}")
             while True:
+                conn, addr = sock.accept()
+                print(f"Подключено клиентом: {addr}")
                 try:
-                    conn, addr = sock.accept()
-                    print(f"Подключено клиентом: {addr}")
                     with context.wrap_socket(conn, server_side=True) as ssock:
                         data = ssock.recv(1024)
-                        print(f"Получено: {data.decode('utf-8')}")
+                        print(f"Полученные данные: {data[:50]}...")  # Показываем начало сообщения
                 except Exception as e:
                     print(f"Ошибка при работе сервера: {e}")
 
@@ -124,7 +146,7 @@ def start_tls_server(host, port):
 def auto_detect_ports(ip_entry, tls_port_entry, ftp_port_entry):
     try:
         host = socket.gethostbyname(socket.gethostname())
-        ip_entry.delete(0, tk.END)
+        ip_entry.delete(0, END)
         ip_entry.insert(0, host)
 
         def is_port_free(port):
@@ -140,9 +162,9 @@ def auto_detect_ports(ip_entry, tls_port_entry, ftp_port_entry):
         while not is_port_free(ftp_port):
             ftp_port += 1
 
-        tls_port_entry.delete(0, tk.END)
+        tls_port_entry.delete(0, END)
         tls_port_entry.insert(0, str(tls_port))
-        ftp_port_entry.delete(0, tk.END)
+        ftp_port_entry.delete(0, END)
         ftp_port_entry.insert(0, str(ftp_port))
 
         messagebox.showinfo("Успех", "IP и порты успешно определены!")
@@ -180,14 +202,18 @@ class ServerApp:
         self.ftp_port_entry.grid(row=2, column=1, padx=10, pady=5)
 
         # Кнопки
-        tk.Button(center_frame, text="Запустить сервер", command=self.start_server_ui, bg="#555", fg="white").grid(
+        tk.Button(center_frame, text="Запустить сервер",
+                  command=self.start_server_ui, bg="#555", fg="white").grid(
             row=3, column=0, columnspan=2, pady=10)
         tk.Button(center_frame, text="Автоопределение IP и портов",
                   command=lambda: auto_detect_ports(self.ip_entry, self.tls_port_entry, self.ftp_port_entry),
-                  bg="#555", fg="white").grid(row=4, column=0, columnspan=2, pady=10)
-        tk.Button(center_frame, text="Сгенерировать сертификаты", command=generate_certificates, bg="#555",
-                  fg="white").grid(row=5, column=0, columnspan=2, pady=10)
-        tk.Button(center_frame, text="Проверить соединение", command=self.connect_to_server, bg="#555", fg="white").grid(
+                  bg="#555", fg="white").grid(
+            row=4, column=0, columnspan=2, pady=10)
+        tk.Button(center_frame, text="Сгенерировать сертификаты",
+                  command=generate_certificates, bg="#555", fg="white").grid(
+            row=5, column=0, columnspan=2, pady=10)
+        tk.Button(center_frame, text="Проверить соединение",
+                  command=self.connect_to_server, bg="#555", fg="white").grid(
             row=6, column=0, columnspan=2, pady=10)
 
         # Сертификат
